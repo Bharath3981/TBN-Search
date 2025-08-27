@@ -1,4 +1,4 @@
-import { useMemo, useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback } from "react";
 import {
   AppBar,
   Box,
@@ -21,6 +21,7 @@ import {
   DialogTitle,
   DialogContent,
   Chip,
+  MenuItem,
 } from "@mui/material";
 import SearchIcon from "@mui/icons-material/Search";
 import CloseIcon from "@mui/icons-material/Close";
@@ -57,9 +58,6 @@ type ApiResponse = {
   };
 };
 
-const MOCK: Item[] = [
-];
-
 // Dark theme similar to the reference UI
 const theme = createTheme({
   palette: { mode: "dark", background: { default: "#0e0e0e", paper: "#121212" } },
@@ -67,7 +65,7 @@ const theme = createTheme({
 });
 
 // Base API URL can be changed globally via env: VITE_API_BASE_URL (fallback '/api')
-const API_BASE = (import.meta as any).env?.VITE_API_BASE_URL || "http://localhost:3000/api";
+const API_BASE = "http://localhost:3000/api";
 
 // Map API item -> UI Item
 function mapApiToItem(ai: ApiItem): Item {
@@ -78,7 +76,7 @@ function mapApiToItem(ai: ApiItem): Item {
     description: ai.description || "",
     image:
       ai.thumbnailUrl ||
-      "https://images.unsplash.com/photo-1495567720989-cebdbdd97913?q=80&w=1200&auto=format&fit=crop",
+      "",
     raw: ai,
   };
 }
@@ -130,23 +128,24 @@ function MediaCard({ item, onClick }: { item: Item; onClick?: (item: Item) => vo
 export default function App() {
   const [q, setQ] = useState("");
   const [tab, setTab] = useState<"episodes" | "series">("series");
-  const [items, setItems] = useState<Item[]>([]);
   const [loading, setLoading] = useState(false);
   const [counts, setCounts] = useState<{ series: number; episodes: number }>({ series: 0, episodes: 0 });
+  const [seriesItems, setSeriesItems] = useState<Item[]>([]);
+  const [episodeItems, setEpisodeItems] = useState<Item[]>([]);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [dialogData, setDialogData] = useState<any>(null);
   const debouncedQ = useDebounce(q, 500);
+  const [engine, setEngine] = useState<"al" | "es">("al"); // Algolia (al) or Elasticsearch (es)
+  const [language, setLanguage] = useState<string>("en");
 
-  const series = useMemo(() => (items.length ? items : MOCK).filter((i) => i.kind === "series"), [items]);
-  const episodes = useMemo(() => (items.length ? items : MOCK).filter((i) => i.kind === "episode"), [items]);
-
-  const visible = tab === "series" ? series : episodes;
+  const visible = tab === "series" ? seriesItems : episodeItems;
 
   async function fetchOne(documentType: "playlist" | "media", qv: string) {
     const params = new URLSearchParams();
     params.set("q", qv);
     params.set("documentType", documentType);
-    const url = `${API_BASE}/search/al?${params.toString()}`;
+    if (language) params.set("language", language);
+    const url = `${API_BASE}/search/${engine}?${params.toString()}`;
     const res = await fetch(url);
     const data: ApiResponse = await res.json();
     const arr = data?.data?.results ?? [];
@@ -160,8 +159,23 @@ export default function App() {
     // Only query when user typed something
     const qv = debouncedQ.trim();
     if (!qv) {
-      setItems([]);
-      setCounts({ series: 0, episodes: 0 });
+      setLoading(true);
+      try {
+        const [seriesAll, episodesAll] = await Promise.all([
+          fetchOne("playlist", ""),
+          fetchOne("media", ""),
+        ]);
+        setCounts({ series: seriesAll.total, episodes: episodesAll.total });
+        setSeriesItems(seriesAll.mapped);
+        setEpisodeItems(episodesAll.mapped);
+      } catch (err) {
+        console.error("Fetch all failed", err);
+        setSeriesItems([]);
+        setEpisodeItems([]);
+        setCounts({ series: 0, episodes: 0 });
+      } finally {
+        setLoading(false);
+      }
       return;
     }
 
@@ -175,21 +189,17 @@ export default function App() {
 
       // Update counts from totals returned by API
       setCounts({ series: seriesRes.total, episodes: episodesRes.total });
-
-      // Render items only for the active tab
-      if (tab === "series") {
-        setItems(seriesRes.mapped);
-      } else {
-        setItems(episodesRes.mapped);
-      }
+      setSeriesItems(seriesRes.mapped);
+      setEpisodeItems(episodesRes.mapped);
     } catch (err) {
       console.error("Search fetch failed", err);
-      setItems([]);
+      setSeriesItems([]);
+      setEpisodeItems([]);
       setCounts({ series: 0, episodes: 0 });
     } finally {
       setLoading(false);
     }
-  }, [debouncedQ, tab]);
+  }, [debouncedQ, engine, language]);
 
   useEffect(() => {
     fetchData();
@@ -220,29 +230,60 @@ export default function App() {
           }}
         >
           <Container maxWidth={false} sx={{ py: 1.5, px: 3 }}>
-            <TextField
-              fullWidth
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-              placeholder="Search"
-              slotProps={{
-                input: {
-                  sx: { bgcolor: "transparent" },
-                  startAdornment: (
-                    <InputAdornment position="start">
-                      <SearchIcon />
-                    </InputAdornment>
-                  ),
-                  endAdornment: q ? (
-                    <InputAdornment position="end">
-                      <IconButton onClick={() => setQ("")}>
-                        <CloseIcon />
-                      </IconButton>
-                    </InputAdornment>
-                  ) : undefined,
-                },
-              }}
-            />
+            <Box sx={{ display: "flex", gap: 1.5, alignItems: "center" }}>
+              <TextField
+                fullWidth
+                size="small" // reduce height
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                placeholder="Search"
+                slotProps={{
+                  input: {
+                    sx: { bgcolor: "transparent" },
+                    startAdornment: (
+                      <InputAdornment position="start">
+                        <SearchIcon />
+                      </InputAdornment>
+                    ),
+                    endAdornment: q ? (
+                      <InputAdornment position="end">
+                        <IconButton onClick={() => setQ("")}>
+                          <CloseIcon />
+                        </IconButton>
+                      </InputAdornment>
+                    ) : undefined,
+                  },
+                }}
+              />
+              <TextField
+                select
+                label="Engine"
+                size="small"
+                value={engine}
+                onChange={(e) => setEngine(e.target.value as "al" | "es")}
+                sx={{ minWidth: 160 }}
+              >
+                <MenuItem value="al">Algolia</MenuItem>
+                <MenuItem value="es">Elasticsearch</MenuItem>
+              </TextField>
+              <TextField
+                select
+                label="Lang"
+                size="small"
+                value={language}
+                onChange={(e) => setLanguage(e.target.value)}
+                sx={{ minWidth: 120 }}
+              >
+                <MenuItem value="">Select</MenuItem>
+                <MenuItem value="en">English (en)</MenuItem>
+                <MenuItem value="es">English Africa (es)</MenuItem>
+                <MenuItem value="fr">French (fr)</MenuItem>
+                <MenuItem value="de">German (de)</MenuItem>
+                <MenuItem value="uk">Ukrainian (uk)</MenuItem>
+                <MenuItem value="en-gb">British English (en-gb)</MenuItem>
+                <MenuItem value="uk">Ukrainian (uk)</MenuItem>
+              </TextField>
+            </Box>
           </Container>
         </AppBar>
 
