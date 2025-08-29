@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef, useDeferredValue, memo } from "react";
 import {
   AppBar,
   Box,
@@ -22,6 +22,7 @@ import {
   DialogContent,
   Chip,
   MenuItem,
+  Autocomplete,
 } from "@mui/material";
 import SearchIcon from "@mui/icons-material/Search";
 import CloseIcon from "@mui/icons-material/Close";
@@ -65,7 +66,7 @@ const theme = createTheme({
 });
 
 // Base API URL can be changed globally via env: VITE_API_BASE_URL (fallback '/api')
-const API_BASE = "http://localhost:3000/api";
+const API_BASE = "https://mbs-dev-api.trilogyapps.com/api";//"http://localhost:3000/api";
 
 // Map API item -> UI Item
 function mapApiToItem(ai: ApiItem): Item {
@@ -81,14 +82,14 @@ function mapApiToItem(ai: ApiItem): Item {
   };
 }
 
-function MediaCard({ item, onClick }: { item: Item; onClick?: (item: Item) => void }) {
+const MediaCard = memo(function MediaCard({ item, onClick }: { item: Item; onClick?: (item: Item) => void }) {
   return (
     <Card sx={{ borderRadius: 2, bgcolor: "background.paper" }}>
       <CardActionArea onClick={onClick ? () => onClick(item) : undefined}>
         <Box sx={{ position: "relative" }}>
-          <CardMedia component="img" height={180} image={item.image} alt={item.title} loading="lazy" />
+          <CardMedia component="img" height={180} image={item.image} alt={item.title} loading="lazy" decoding="async" />
           <Chip
-            label={item.kind === "series" ? "Series" : "Episode"}
+            label={item.kind === "series" ? "Series" : item.kind}
             size="small"
             color="primary"
             sx={{
@@ -101,7 +102,7 @@ function MediaCard({ item, onClick }: { item: Item; onClick?: (item: Item) => vo
             }}
           />
         </Box>
-        <CardContent sx={{ pt: 1.5 }}>
+        <CardContent sx={{ pt: 1.5, minHeight: 88 }}>
           <Typography variant="subtitle2" noWrap title={item.title}>
             {item.title}
           </Typography>
@@ -123,7 +124,7 @@ function MediaCard({ item, onClick }: { item: Item; onClick?: (item: Item) => vo
       </CardActionArea>
     </Card>
   );
-}
+});
 
 export default function App() {
   const [q, setQ] = useState("");
@@ -132,21 +133,26 @@ export default function App() {
   const [counts, setCounts] = useState<{ series: number; episodes: number }>({ series: 0, episodes: 0 });
   const [seriesItems, setSeriesItems] = useState<Item[]>([]);
   const [episodeItems, setEpisodeItems] = useState<Item[]>([]);
+  const abortRef = useRef<AbortController | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [dialogData, setDialogData] = useState<any>(null);
   const debouncedQ = useDebounce(q, 500);
   const [engine, setEngine] = useState<"al" | "es">("al"); // Algolia (al) or Elasticsearch (es)
   const [language, setLanguage] = useState<string>("en");
+  const [tags, setTags] = useState<string[]>([]);
 
   const visible = tab === "series" ? seriesItems : episodeItems;
+  const deferredVisible = useDeferredValue(visible);
 
-  async function fetchOne(documentType: "playlist" | "media", qv: string) {
+  async function fetchOne(documentType: "playlist" | "media", qv: string, signal?: AbortSignal) {
     const params = new URLSearchParams();
     params.set("q", qv);
     params.set("documentType", documentType);
-    if (language) params.set("language", language);
+    if (language) params.set("network", language);
+    if (tags.length) params.set("tags", tags.join(","));
+    params.set("limit", "500");
     const url = `${API_BASE}/search/${engine}?${params.toString()}`;
-    const res = await fetch(url);
+    const res = await fetch(url, { signal });
     const data: ApiResponse = await res.json();
     const arr = data?.data?.results ?? [];
     return {
@@ -156,19 +162,25 @@ export default function App() {
   }
 
   const fetchData = useCallback(async () => {
+    // Cancel any in-flight request before starting a new one
+    abortRef.current?.abort();
+    const ac = new AbortController();
+    abortRef.current = ac;
+
     // Only query when user typed something
     const qv = debouncedQ.trim();
     if (!qv) {
       setLoading(true);
       try {
         const [seriesAll, episodesAll] = await Promise.all([
-          fetchOne("playlist", ""),
-          fetchOne("media", ""),
+          fetchOne("playlist", "", ac.signal),
+          fetchOne("media", "", ac.signal),
         ]);
         setCounts({ series: seriesAll.total, episodes: episodesAll.total });
         setSeriesItems(seriesAll.mapped);
         setEpisodeItems(episodesAll.mapped);
-      } catch (err) {
+      } catch (err: any) {
+        if (err?.name === "AbortError") return;
         console.error("Fetch all failed", err);
         setSeriesItems([]);
         setEpisodeItems([]);
@@ -183,15 +195,16 @@ export default function App() {
     try {
       // Always fetch both totals in parallel so tab counts stay accurate.
       const [seriesRes, episodesRes] = await Promise.all([
-        fetchOne("playlist", qv),
-        fetchOne("media", qv),
+        fetchOne("playlist", qv, ac.signal),
+        fetchOne("media", qv, ac.signal),
       ]);
 
       // Update counts from totals returned by API
       setCounts({ series: seriesRes.total, episodes: episodesRes.total });
       setSeriesItems(seriesRes.mapped);
       setEpisodeItems(episodesRes.mapped);
-    } catch (err) {
+    } catch (err: any) {
+      if (err?.name === "AbortError") return;
       console.error("Search fetch failed", err);
       setSeriesItems([]);
       setEpisodeItems([]);
@@ -199,7 +212,7 @@ export default function App() {
     } finally {
       setLoading(false);
     }
-  }, [debouncedQ, engine, language]);
+  }, [debouncedQ, engine, language, tags]);
 
   useEffect(() => {
     fetchData();
@@ -223,7 +236,6 @@ export default function App() {
           sx={{
             top: 0,
             zIndex: (theme) => theme.zIndex.drawer + 1,
-            backdropFilter: "saturate(180%) blur(8px)",
             backgroundColor: "rgba(18,18,18,0.72)",
             borderBottom: 1,
             borderColor: "divider",
@@ -268,7 +280,7 @@ export default function App() {
               </TextField>
               <TextField
                 select
-                label="Lang"
+                label="Network"
                 size="small"
                 value={language}
                 onChange={(e) => setLanguage(e.target.value)}
@@ -283,6 +295,17 @@ export default function App() {
                 <MenuItem value="en-gb">British English (en-gb)</MenuItem>
                 <MenuItem value="uk">Ukrainian (uk)</MenuItem>
               </TextField>
+              <Autocomplete
+                multiple
+                freeSolo
+                options={[]}
+                value={tags}
+                onChange={(_, v) => setTags(v as string[])}
+                renderInput={(params) => (
+                  <TextField {...params} label="Tags" size="small" placeholder="Add tag + Enter" />
+                )}
+                sx={{ minWidth: 240 }}
+              />
             </Box>
           </Container>
         </AppBar>
@@ -304,7 +327,7 @@ export default function App() {
           )}
           <Box sx={{ width: "100%", maxWidth: 1480 }}>
             <Grid container spacing={2}>
-              {visible.map((item) => (
+              {deferredVisible.map((item) => (
                 <Grid key={item.id} size={{ xs: 12, sm: 6, md: 4, lg: 3, xl: 2 }}>
                   <MediaCard item={item} onClick={handleCardClick} />
                 </Grid>
